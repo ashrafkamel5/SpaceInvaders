@@ -1,0 +1,216 @@
+// SpaceInvaders.c
+// Runs on LM4F120/TM4C123
+// Jonathan Valvano and Daniel Valvano
+// This is a starter project for the edX Lab 15
+// In order for other students to play your game
+// 1) You must leave the hardware configuration as defined
+// 2) You must not add/remove any files from the project
+// 3) You must add your code only this this C file
+// I.e., if you wish to use code from sprite.c or sound.c, move that code in this file
+// 4) It must compile with the 32k limit of the free Keil
+
+// April 10, 2014
+// http://www.spaceinvaders.de/
+// sounds at http://www.classicgaming.cc/classics/spaceinvaders/sounds.php
+// http://www.classicgaming.cc/classics/spaceinvaders/playguide.php
+/* This example accompanies the books
+   "Embedded Systems: Real Time Interfacing to Arm Cortex M Microcontrollers",
+   ISBN: 978-1463590154, Jonathan Valvano, copyright (c) 2013
+
+   "Embedded Systems: Introduction to Arm Cortex M Microcontrollers",
+   ISBN: 978-1469998749, Jonathan Valvano, copyright (c) 2013
+
+ Copyright 2014 by Jonathan W. Valvano, valvano@mail.utexas.edu
+    You may use, edit, run or distribute this file
+    as long as the above copyright notice remains
+ THIS SOFTWARE IS PROVIDED "AS IS".  NO WARRANTIES, WHETHER EXPRESS, IMPLIED
+ OR STATUTORY, INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE APPLY TO THIS SOFTWARE.
+ VALVANO SHALL NOT, IN ANY CIRCUMSTANCES, BE LIABLE FOR SPECIAL, INCIDENTAL,
+ OR CONSEQUENTIAL DAMAGES, FOR ANY REASON WHATSOEVER.
+ For more information about my classes, my research, and my books, see
+ http://users.ece.utexas.edu/~valvano/
+ */
+// ******* Required Hardware I/O connections*******************
+// Slide pot pin 1 connected to ground
+// Slide pot pin 2 connected to PE2/AIN1
+// Slide pot pin 3 connected to +3.3V 
+// fire button connected to PE0
+// special weapon fire button connected to PE1
+// 8*R resistor DAC bit 0 on PB0 (least significant bit)
+// 4*R resistor DAC bit 1 on PB1
+// 2*R resistor DAC bit 2 on PB2
+// 1*R resistor DAC bit 3 on PB3 (most significant bit)
+// LED on PB4
+// LED on PB5
+
+// Blue Nokia 5110
+// ---------------
+// Signal        (Nokia 5110) LaunchPad pin
+// Reset         (RST, pin 1) connected to PA7
+// SSI0Fss       (CE,  pin 2) connected to PA3
+// Data/Command  (DC,  pin 3) connected to PA6
+// SSI0Tx        (Din, pin 4) connected to PA5
+// SSI0Clk       (Clk, pin 5) connected to PA2
+// 3.3V          (Vcc, pin 6) power
+// back light    (BL,  pin 7) not connected, consists of 4 white LEDs which draw ~80mA total
+// Ground        (Gnd, pin 8) ground
+
+// Red SparkFun Nokia 5110 (LCD-10168)
+// -----------------------------------
+// Signal        (Nokia 5110) LaunchPad pin
+// 3.3V          (VCC, pin 1) power
+// Ground        (GND, pin 2) ground
+// SSI0Fss       (SCE, pin 3) connected to PA3
+// Reset         (RST, pin 4) connected to PA7
+// Data/Command  (D/C, pin 5) connected to PA6
+// SSI0Tx        (DN,  pin 6) connected to PA5
+// SSI0Clk       (SCLK, pin 7) connected to PA2
+// back light    (LED, pin 8) not connected, consists of 4 white LEDs which draw ~80mA total
+
+#include "..//tm4c123gh6pm.h"
+#include "Nokia5110.h"
+#include "Random.h"
+#include "TExaS.h"
+#include <stdint.h>
+#include "Timers.h"
+#include "ADC.h"
+#include "sprite.h"
+#include "Images.h"
+#include "switch.h"
+
+
+void DisableInterrupts(void); // Disable interrupts
+void EnableInterrupts(void);  // Enable interrupts
+void Timer2_Init(unsigned long period);
+void Delay100ms(unsigned long count); // time delay in 0.1 seconds
+void updateInputs(void);
+unsigned long TimerCount;
+unsigned long ShotDelay;
+unsigned long EnemyDelay;
+
+
+int main(void)
+{
+  TExaS_Init(SSI0_Real_Nokia5110_Scope);  // set system clock to 80 MHz
+  Random_Init(1);
+	Nokia5110_Init();
+	ADC0_InitTimer0ATriggerSeq3PE2(33 ,80000 ,0); 
+	init_switch();
+	Systick_Init(33 ,0 ,80000 ,interrupt);
+	
+	Nokia5110_Clear();
+	Nokia5110_DisplayBuffer();     // draw buffer
+  /*Nokia5110_Clear();
+  Nokia5110_SetCursor(1, 1);
+  Nokia5110_OutString("GAME OVER");
+  Nokia5110_SetCursor(1, 2);
+  Nokia5110_OutString("Nice try,");
+  Nokia5110_SetCursor(1, 3);
+  Nokia5110_OutString("Earthling!");
+  Nokia5110_SetCursor(2, 4);
+  Nokia5110_OutUDec(1234);*/
+  initGame();
+	while(1)
+	{
+		if(Semaphore == 1)
+    {
+			update();
+			Draw(); 
+			Semaphore = 0;
+		}
+	}
+}
+
+
+// You can use this timer only if you learn how it works
+void Timer2_Init(unsigned long period){ 
+  unsigned long volatile delay;
+  SYSCTL_RCGCTIMER_R |= 0x04;   // 0) activate timer2
+  delay = SYSCTL_RCGCTIMER_R;
+  TimerCount = 0;
+  Semaphore = 0;
+  TIMER2_CTL_R = 0x00000000;    // 1) disable timer2A during setup
+  TIMER2_CFG_R = 0x00000000;    // 2) configure for 32-bit mode
+  TIMER2_TAMR_R = 0x00000002;   // 3) configure for periodic mode, default down-count settings
+  TIMER2_TAILR_R = period-1;    // 4) reload value
+  TIMER2_TAPR_R = 0;            // 5) bus clock resolution
+  TIMER2_ICR_R = 0x00000001;    // 6) clear timer2A timeout flag
+  TIMER2_IMR_R = 0x00000001;    // 7) arm timeout interrupt
+  NVIC_PRI5_R = (NVIC_PRI5_R&0x00FFFFFF)|0x80000000; // 8) priority 4
+// interrupts enabled in the main program after all devices initialized
+// vector number 39, interrupt number 23
+  NVIC_EN0_R = 1<<23;           // 9) enable IRQ 23 in NVIC
+  TIMER2_CTL_R = 0x00000001;    // 10) enable timer2A
+}
+void Timer2A_Handler(void){ 
+  TIMER2_ICR_R = 0x00000001;   // acknowledge timer2A timeout
+  TimerCount++;
+  Semaphore = 1; // trigger
+}
+void Delay100ms(unsigned long count){unsigned long volatile time;
+  while(count>0){
+    time = 727240;  // 0.1sec at 80 MHz
+    while(time){
+	  	time--;
+    }
+    count--;
+  }
+}
+
+void updateInputs()
+{
+	ShotDelay++;
+	if(ShotDelay == 15)
+	{
+		player.special_fire = SPECIAL_MISSILE;
+		player.fire = MISSILE;
+		SPECIAL_MISSILE = false;
+		MISSILE = false;
+		ShotDelay = 0;
+	}
+}
+
+void SysTick_Handler()
+{
+  TimerCount++;
+	
+	if((GPIO_PORTE_DATA_R&0x1) == 0)
+	{
+	   MISSILE = true;
+	}
+	else if((GPIO_PORTE_DATA_R&0x2) == 0)
+	{
+     SPECIAL_MISSILE = true;	
+	}
+	updateInputs();
+	Semaphore = 1;
+//  uint32_t result;
+//  result = ADC0_In();
+//	player.x = (int)map(result ,0 ,0xFFF ,0 ,83 - PLAYERW);
+}
+
+void ADC0Seq3_Handler()
+{
+	uint32_t result;
+	
+	ADC0_ISC_R = 0x08;               // acknowledge ADC sequence 3 completion
+  result = ADC0_SSFIFO3_R&0xFFF;   // read result
+	player.x = (int)map(result ,0 ,0xFFF ,0 ,84-PLAYERW);
+}
+
+void GPIOPortE_Handler()
+{
+	if((GPIO_PORTE_DATA_R&0x1) == 0)
+	{
+	   MISSILE = true;
+	}
+	else if((GPIO_PORTE_DATA_R&0x2) == 0)
+	{
+     SPECIAL_MISSILE = true;	
+	}
+}
+
+
+
+
